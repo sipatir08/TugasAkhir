@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.figure_factory as ff
 import sys
@@ -343,10 +344,11 @@ if st.session_state.get('training_done', False):
         )
 
         with st.expander("📊 Lihat Feature Importance per Kategori"):
+            numeric_subset = [c for c in st.session_state['shap_per_class'].columns if c != 'Fitur']
             st.dataframe(
-                st.session_state['shap_per_class'].style.background_gradient(
-                    cmap='YlOrRd', subset=[c for c in st.session_state['shap_per_class'].columns if c != 'Fitur']
-                ).format({c: '{:.4f}' for c in st.session_state['shap_per_class'].columns if c != 'Fitur'}),
+                st.session_state['shap_per_class'].style.bar(
+                    subset=numeric_subset, color='#FF8A65'
+                ).format({c: '{:.4f}' for c in numeric_subset}),
                 hide_index=True, use_container_width=True
             )
 
