@@ -223,6 +223,8 @@ if st.button("▶️ Mulai Training", type="primary", use_container_width=True):
 
         st.session_state['X_test'] = X_test
         st.session_state['y_test'] = y_test
+        st.session_state['X_full'] = X
+        st.session_state['y_full'] = y
 
     results_list = []
     models_dict = {}
@@ -353,6 +355,68 @@ if st.session_state.get('training_done', False):
             )
 
     st.divider()
+
+    # ============================================
+    # UJI STABILITAS MODEL (REPEATED K-FOLD)
+    # ============================================
+    st.markdown("### 🔄 Uji Stabilitas Model")
+    st.caption("Menguji apakah performa model terbaik konsisten jika data dibagi ulang berkali-kali "
+               "dengan cara berbeda-beda (Repeated Stratified K-Fold: 5-fold, 10 pengulangan, total 50 kali pengujian).")
+
+    if st.button("🔄 Jalankan Uji Stabilitas", use_container_width=True):
+        with st.spinner("Menjalankan 50 kali pengujian, mohon tunggu..."):
+            from sklearn.model_selection import RepeatedStratifiedKFold
+            from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score
+            from sklearn.base import clone
+
+            X_full = st.session_state['X_full']
+            y_full = st.session_state['y_full']
+
+            fresh_pipeline = clone(best_model)
+
+            rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=10, random_state=42)
+
+            accs, precs, recs, f1s = [], [], [], []
+            progress = st.progress(0, text="Memulai pengujian...")
+
+            for i, (train_idx, test_idx) in enumerate(rskf.split(X_full, y_full), start=1):
+                X_tr, X_te = X_full.iloc[train_idx], X_full.iloc[test_idx]
+                y_tr, y_te = y_full.iloc[train_idx], y_full.iloc[test_idx]
+
+                fresh_pipeline.fit(X_tr, y_tr)
+                y_pred = fresh_pipeline.predict(X_te)
+
+                accs.append(accuracy_score(y_te, y_pred))
+                precs.append(precision_score(y_te, y_pred, average='macro', zero_division=0))
+                recs.append(recall_score(y_te, y_pred, average='macro', zero_division=0))
+                f1s.append(f1_score(y_te, y_pred, average='macro', zero_division=0))
+
+                progress.progress(i / 50, text=f"Pengujian ke-{i}/50")
+
+            st.session_state['stability_results'] = {
+                'accuracy': accs, 'precision': precs, 'recall': recs, 'f1': f1s
+            }
+            st.success("✅ Uji stabilitas selesai!")
+
+    if 'stability_results' in st.session_state:
+        results = st.session_state['stability_results']
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Accuracy", f"{np.mean(results['accuracy']):.4f}", f"± {np.std(results['accuracy']):.4f}")
+        col2.metric("Precision", f"{np.mean(results['precision']):.4f}", f"± {np.std(results['precision']):.4f}")
+        col3.metric("Recall", f"{np.mean(results['recall']):.4f}", f"± {np.std(results['recall']):.4f}")
+        col4.metric("F1-Score", f"{np.mean(results['f1']):.4f}", f"± {np.std(results['f1']):.4f}")
+
+        stability_df = pd.DataFrame({
+            'Percobaan': list(range(1, 51)) * 4,
+            'Skor': results['accuracy'] + results['precision'] + results['recall'] + results['f1'],
+            'Metrik': ['Accuracy'] * 50 + ['Precision'] * 50 + ['Recall'] * 50 + ['F1-Score'] * 50
+        })
+
+        fig = px.box(stability_df, x='Metrik', y='Skor', color='Metrik',
+                     title='Distribusi Skor dari 50 Kali Pengujian (Repeated Stratified K-Fold)',
+                     points='all')
+        st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### 💾 Simpan Model")
     st.markdown(f"Model terbaik (**{best_name}**) akan disimpan dan digunakan pada halaman Prediksi.")
