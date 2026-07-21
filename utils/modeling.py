@@ -4,6 +4,7 @@ import os
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import roc_curve
 from sklearn.metrics import (
     accuracy_score, f1_score, classification_report, confusion_matrix
 )
@@ -11,6 +12,8 @@ from sklearn.preprocessing import LabelEncoder
 
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import label_binarize
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -40,7 +43,7 @@ def train_random_forest(X_train, y_train, use_smote=True):
     grid = GridSearchCV(
         estimator=estimator,
         param_grid=param_grid,
-        cv=3,
+        cv=10,
         scoring='f1_macro',
         n_jobs=-1,
         verbose=1
@@ -77,7 +80,7 @@ def train_xgboost(X_train, y_train, use_smote=True):
     grid = GridSearchCV(
         estimator=estimator,
         param_grid=param_grid,
-        cv=3,
+        cv=10,
         scoring='f1_macro',
         n_jobs=-1,
         verbose=1
@@ -110,7 +113,7 @@ def train_lightgbm(X_train, y_train, use_smote=True):
     grid = GridSearchCV(
         estimator=estimator,
         param_grid=param_grid,
-        cv=3,
+        cv=10,
         scoring='f1_macro',
         n_jobs=-1,
         verbose=1
@@ -197,3 +200,51 @@ def get_best_model(results_list, models_dict):
     best_result = max(results_list, key=lambda r: r['f1_macro'])
     best_name = best_result['model_name']
     return best_name, models_dict[best_name]
+    
+def calculate_roc_auc(model, X_test, y_test, class_names, label_encoder=None):
+    """
+    Hitung ROC-AUC untuk klasifikasi multi-kelas pakai pendekatan one-vs-rest.
+    Return: dict berisi AUC per kelas + macro-average AUC
+    """
+    y_proba = model.predict_proba(X_test)
+
+    if label_encoder is not None:
+        y_test_encoded = label_encoder.transform(y_test)
+    else:
+        y_test_encoded = np.array([list(class_names).index(v) for v in y_test])
+
+    y_test_bin = label_binarize(y_test_encoded, classes=range(len(class_names)))
+
+    auc_per_class = {}
+    for i, cls in enumerate(class_names):
+        auc = roc_auc_score(y_test_bin[:, i], y_proba[:, i])
+        auc_per_class[cls] = auc
+
+    macro_auc = roc_auc_score(y_test_bin, y_proba, average='macro', multi_class='ovr')
+
+    return {
+        'per_class': auc_per_class,
+        'macro_auc': macro_auc
+    }
+
+def get_roc_curve_data(model, X_test, y_test, class_names, label_encoder=None):
+    """
+    Hitung data kurva ROC (FPR, TPR) untuk tiap kelas, one-vs-rest.
+    Return: dict {nama_kelas: (fpr, tpr, auc)}
+    """
+    y_proba = model.predict_proba(X_test)
+
+    if label_encoder is not None:
+        y_test_encoded = label_encoder.transform(y_test)
+    else:
+        y_test_encoded = np.array([list(class_names).index(v) for v in y_test])
+
+    y_test_bin = label_binarize(y_test_encoded, classes=range(len(class_names)))
+
+    curve_data = {}
+    for i, cls in enumerate(class_names):
+        fpr, tpr, _ = roc_curve(y_test_bin[:, i], y_proba[:, i])
+        auc_score = roc_auc_score(y_test_bin[:, i], y_proba[:, i])
+        curve_data[cls] = (fpr, tpr, auc_score)
+
+    return curve_data

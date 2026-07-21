@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.figure_factory as ff
 import sys
 import os
+import plotly.graph_objects as go
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.preprocessing import (
@@ -13,7 +14,8 @@ from utils.preprocessing import (
 )
 from utils.modeling import (
     train_random_forest, train_xgboost, train_lightgbm,
-    evaluate_model, save_model, compare_models, get_best_model
+    evaluate_model, save_model, compare_models, get_best_model,
+    calculate_roc_auc, get_roc_curve_data
 )
 
 st.set_page_config(page_title="Modeling - HR Performance", page_icon="🤖", layout="wide")
@@ -240,6 +242,7 @@ if st.button("▶️ Mulai Training", type="primary", use_container_width=True):
     result_xgb = evaluate_model(model_xgb, X_test, y_test, model_name="XGBoost", label_encoder=le_target)
     results_list.append(result_xgb)
     models_dict["XGBoost"] = model_xgb
+    st.session_state['xgb_label_encoder'] = le_target
 
     progress_bar.progress(66, text="Training LightGBM...")
     model_lgb, params_lgb, score_lgb = train_lightgbm(X_train, y_train, use_smote=use_smote)
@@ -311,48 +314,130 @@ if st.session_state.get('training_done', False):
 
             st.divider()
 
+            # ============================================
+    # ROC-AUC (ONE-VS-REST)
     # ============================================
-    # SHAP FEATURE IMPORTANCE (GLOBAL)
-    # ============================================
-    st.markdown("### 🔍 Analisis SHAP — Feature Importance")
-    st.caption("Menampilkan kontribusi setiap fitur terhadap prediksi model terbaik, dihitung dari seluruh data test.")
+    st.markdown("### 📈 ROC-AUC (One-vs-Rest)")
+    st.caption("Mengukur seberapa baik model membedakan tiap kelas dari kelas lainnya (skor 0,5 = acak, 1,0 = sempurna).")
 
-    if st.button("🔍 Hitung SHAP Feature Importance", use_container_width=True):
-        with st.spinner("Menghitung SHAP values, mohon tunggu..."):
-            from utils.shap_utils import create_explainer, get_global_importance, get_per_class_importance
+    roc_tabs = st.tabs([r['model_name'] for r in results_list])
+    for tab, r in zip(roc_tabs, results_list):
+        with tab:
+            model_for_roc = models_dict[r['model_name']]
+            label_enc = st.session_state.get('xgb_label_encoder') if r['model_name'] == 'XGBoost' else None
 
             try:
-                explainer = create_explainer(best_model)
-                final_model_for_shap = best_model.named_steps['clf'] if hasattr(best_model, 'named_steps') else best_model
-                X_test_saved = st.session_state['X_test']
-                shap_values = explainer.shap_values(X_test_saved)
+                roc_results = calculate_roc_auc(
+                    model_for_roc, st.session_state['X_test'], st.session_state['y_test'],
+                    class_names, label_encoder=label_enc
+                )
 
-                global_importance = get_global_importance(shap_values, list(X_test_saved.columns))
-                per_class_importance = get_per_class_importance(shap_values, list(X_test_saved.columns), final_model_for_shap.classes_)
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Macro AUC", f"{roc_results['macro_auc']:.4f}")
+                cols = [col2, col3, col4]
+                for i, (cls, auc) in enumerate(roc_results['per_class'].items()):
+                    cols[i % 3].metric(f"AUC ({cls})", f"{auc:.4f}")
 
-                st.session_state['shap_global'] = global_importance
-                st.session_state['shap_per_class'] = per_class_importance
-                st.success("✅ Perhitungan SHAP selesai!")
+                # ============================================
+                # KURVA ROC
+                # ============================================
+                curve_data = get_roc_curve_data(
+                    model_for_roc, st.session_state['X_test'], st.session_state['y_test'],
+                    class_names, label_encoder=label_enc
+                )
+
+                fig_roc = go.Figure()
+                for cls, (fpr, tpr, auc_score) in curve_data.items():
+                    fig_roc.add_trace(go.Scatter(
+                        x=fpr, y=tpr, mode='lines',
+                        name=f'{cls} (AUC={auc_score:.3f})'
+                    ))
+                fig_roc.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 1], mode='lines',
+                    line=dict(dash='dash', color='gray'),
+                    name='Random (AUC=0.5)'
+                ))
+                fig_roc.update_layout(
+                    title=f'Kurva ROC — {r["model_name"]}',
+                    xaxis_title='False Positive Rate',
+                    yaxis_title='True Positive Rate',
+                    width=700, height=500
+                )
+                st.plotly_chart(fig_roc, use_container_width=True)
+
             except Exception as e:
-                st.error(f"⚠️ Gagal menghitung SHAP: {e}")
+                st.error(f"⚠️ Gagal menghitung ROC-AUC: {e}")
 
-    if 'shap_global' in st.session_state:
-        st.markdown("#### 🏆 Ranking Feature Importance (Global)")
-        st.dataframe(
-            st.session_state['shap_global'].style.bar(
-                subset=['Rata-rata |SHAP value|'], color='#4FC3F7'
-            ).format({'Rata-rata |SHAP value|': '{:.4f}'}),
-            hide_index=True, use_container_width=True
-        )
+    st.divider()
 
-        with st.expander("📊 Lihat Feature Importance per Kategori"):
-            numeric_subset = [c for c in st.session_state['shap_per_class'].columns if c != 'Fitur']
-            st.dataframe(
-                st.session_state['shap_per_class'].style.bar(
-                    subset=numeric_subset, color='#FF8A65'
-                ).format({c: '{:.4f}' for c in numeric_subset}),
-                hide_index=True, use_container_width=True
-            )
+    # ============================================
+    # SHAP FEATURE IMPORTANCE (GLOBAL) - SEMUA MODEL
+    # ============================================
+    st.markdown("### 🔍 Analisis SHAP — Feature Importance")
+    st.caption("Menampilkan kontribusi setiap fitur terhadap prediksi, dihitung untuk ketiga model.")
+
+    if st.button("🔍 Hitung SHAP Feature Importance (Semua Model)", use_container_width=True):
+        with st.spinner("Menghitung SHAP values untuk semua model, mohon tunggu..."):
+            from utils.shap_utils import create_explainer, get_global_importance, get_per_class_importance
+
+            X_test_saved = st.session_state['X_test']
+            shap_global_all = {}
+            shap_per_class_all = {}
+            errors = {}
+
+            for model_name, model in models_dict.items():
+                try:
+                    explainer = create_explainer(model)
+                    final_model_for_shap = model.named_steps['clf'] if hasattr(model, 'named_steps') else model
+                    shap_values = explainer.shap_values(X_test_saved)
+
+                    if model_name == "XGBoost" and 'xgb_label_encoder' in st.session_state:
+                        class_labels = st.session_state['xgb_label_encoder'].inverse_transform(final_model_for_shap.classes_)
+                    else:
+                        class_labels = final_model_for_shap.classes_
+
+                    global_importance = get_global_importance(shap_values, list(X_test_saved.columns))
+                    per_class_importance = get_per_class_importance(
+                        shap_values, list(X_test_saved.columns), class_labels
+                    )
+
+                    shap_global_all[model_name] = global_importance
+                    shap_per_class_all[model_name] = per_class_importance
+                except Exception as e:
+                    errors[model_name] = str(e)
+
+            st.session_state['shap_global_all_models'] = shap_global_all
+            st.session_state['shap_per_class_all_models'] = shap_per_class_all
+
+            if errors:
+                for model_name, err in errors.items():
+                    st.error(f"⚠️ Gagal menghitung SHAP untuk {model_name}: {err}")
+            if shap_global_all:
+                st.success(f"✅ Perhitungan SHAP selesai untuk {len(shap_global_all)} model!")
+
+    if 'shap_global_all_models' in st.session_state and st.session_state['shap_global_all_models']:
+        st.markdown("#### 🏆 Ranking Feature Importance (Global) — Perbandingan 3 Model")
+
+        shap_tabs = st.tabs(list(st.session_state['shap_global_all_models'].keys()))
+        for tab, model_name in zip(shap_tabs, st.session_state['shap_global_all_models'].keys()):
+            with tab:
+                df_global = st.session_state['shap_global_all_models'][model_name]
+                st.dataframe(
+                    df_global.style.bar(
+                        subset=['Rata-rata |SHAP value|'], color='#4FC3F7'
+                    ).format({'Rata-rata |SHAP value|': '{:.4f}'}),
+                    hide_index=True, use_container_width=True
+                )
+
+                with st.expander(f"📊 Lihat Feature Importance per Kategori — {model_name}"):
+                    df_per_class = st.session_state['shap_per_class_all_models'][model_name]
+                    numeric_subset = [c for c in df_per_class.columns if c != 'Fitur']
+                    st.dataframe(
+                        df_per_class.style.bar(
+                            subset=numeric_subset, color='#FF8A65'
+                        ).format({c: '{:.4f}' for c in numeric_subset}),
+                        hide_index=True, use_container_width=True
+                    )
 
     st.divider()
 
@@ -418,6 +503,11 @@ if st.session_state.get('training_done', False):
                      points='all')
         st.plotly_chart(fig, use_container_width=True)
 
+    st.divider()
+
+    # ============================================
+    # SIMPAN MODEL
+    # ============================================
     st.markdown("### 💾 Simpan Model")
     st.markdown(f"Model terbaik (**{best_name}**) akan disimpan dan digunakan pada halaman Prediksi.")
     st.warning("⚠️ Menyimpan model baru akan **menggantikan** model sebelumnya di folder `model/`.")
